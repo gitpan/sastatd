@@ -1,0 +1,445 @@
+#!/usr/bin/env perl
+
+=head1 NAME
+
+sastatd - SpamAssassin statistic collecting server
+
+=head1 SYNOPSIS
+
+sastatd [ options ] spamd-log-file
+
+=head1 DESCRIPTION
+
+This script (running as a daemon) permanent watching for SpamAssassin
+spamd log file and increment internal counters for any B<spam> and
+B<clean> message. Log rotating events detected automatically, no
+special actions required. Accumulated statistic flushed to persistent
+file based storage periodically. Statistic dump is available via simple
+TCP based protocol.
+
+=head1 PROTOCOL
+
+Communication protocol is line oriented (like HTTP or SMTP). Any command 
+followed by a new line character.
+
+Available commands (case independent):
+    B<brief>  - print out only counters and rate for clean/spam/total messages
+    B<stats>  - print out statistic in easily parsable format
+    B<reset>  - clear all accumulated statistic
+    B<dump>   - print out statistic and clear it immediately
+    B<quit>   - force close connection
+
+=head1 CLIENT EXAMPLE
+
+echo brief | nc 127.0.0.1 4321 | awk -F: '/^clean/ { print $2 }'
+
+=cut
+
+use strict;
+use warnings qw(all);
+
+use Fcntl;
+use FindBin;
+use Getopt::Long qw(:config no_auto_abbrev bundling);
+use JSON::Any;
+use List::Util qw(min max sum);
+use Log::Dispatch;
+use Pid::File::Flock;
+use POE qw(Wheel::FollowTail Wheel::ListenAccept Wheel::ReadWrite);
+use POSIX;
+use Socket;
+
+our $VERSION = 0.01;
+
+# parse command line
+my %opts;
+GetOptions(\%opts, qw/
+	database|d=s
+	debug|g
+	heartbeat|b=i
+	help|h
+	listen|l=s
+	pid-file|p=s
+	user|u=s
+/) or usage();
+
+# explicitly requested help
+usage() if $opts{help};
+
+# invalid arguments count
+usage() if $#ARGV;
+
+# options defaults
+$opts{heartbeat} ||= 10;
+$opts{listen}    ||= 4321;
+$opts{database}  ||= $FindBin::RealScript.'.db';
+
+# resolve uid
+defined (my $uid = $opts{user} ? getpwnam($opts{user}) : $>) or
+	die "Unknown user: $opts{user}\n";
+
+# set process privileges
+setuid $uid or die "Can't setuid to $opts{user}: $!\n" unless $uid == $>;
+
+# set process title
+$0 = $FindBin::RealScript;
+
+# fork
+unless ($opts{debug}) {
+	defined(my $pid = fork) or die "Can't fork: $!\n";
+	exit if $pid;
+}
+
+# protecting against second instance running
+Pid::File::Flock->new($opts{'pid-file'});
+
+# daemonize
+unless ($opts{debug}) {
+	chdir '/' or die "Can't chdir: $!\n";
+	die "Can't create new session: $!\n" if setsid == -1;
+	open STDIN,  '</dev/null' or die "Can't close stdin\n";
+	open STDOUT, '>/dev/null' or die "Can't close stdout\n";
+	open STDERR, '>/dev/null' or die "Can't close stderr\n";
+}
+
+# logger
+my $log = Log::Dispatch->new( outputs => [
+	$opts{debug} ?
+	[ 'Screen', callbacks => [ \&pfmt, \&lfmt, \&dfmt ], min_level => 'debug', stderr => 1 ] :
+	[ 'Syslog', callbacks => [ \&pfmt, ], min_level => 'info', facility => 'daemon', ident => $FindBin::RealScript ],
+]);
+$log->notice("starting up");
+
+# main POE session
+POE::Session->create(
+	inline_states => {
+
+		# initializing
+		_start => sub {
+			$log->debug("initializing POE session");
+
+			# signals
+			$log->debug("setting up signal handlers");
+			$_[KERNEL]->sig(HUP  => 'shutdown');
+			$_[KERNEL]->sig(INT  => 'shutdown');
+			$_[KERNEL]->sig(TERM => 'shutdown');
+
+			# log tailing
+			$log->debug("setting up log tailing");
+			$_[HEAP]->{tailer} = POE::Wheel::FollowTail->new(
+				Filename   => $ARGV[0],
+				ErrorEvent => 'tail_error',
+				InputEvent => 'log_line',
+				ResetEvent => 'log_rolled',
+			);
+
+			# listen socket
+			$log->debug("creating listen socket");
+			my $sock = IO::Socket::INET->new(
+				(
+					$opts{listen} =~ /:/ ?
+					( LocalAddr => $opts{listen} ) :
+					( LocalPort => $opts{listen} )
+				),
+				Listen    => SOMAXCONN,
+				ReuseAddr => 1,
+			) or do {
+				$log->error("can't create listen socket");
+				return $_[KERNEL]->call($_[SESSION], 'shutdown');
+			};
+
+			# statistic server
+			$log->debug("creating TCP server");
+			$_[HEAP]->{server} = POE::Wheel::ListenAccept->new(
+				Handle      => $sock,
+				AcceptEvent => 'server_accept',
+				ErrorEvent  => 'server_error',
+			);
+
+			# JSON serializer
+			$log->debug("creating serializer");
+			$_[HEAP]->{json} = JSON::Any->new;
+
+			# load previous data
+			$_[KERNEL]->call($_[SESSION], 'stat_load');
+
+			# schedule periodic task
+			$log->debug("scheduling heartbeat at $opts{heartbeat} second(s)");
+			$_[KERNEL]->delay( heartbeat => $opts{heartbeat} );
+		},
+
+		# periodically task
+		heartbeat => sub {
+			$log->debug("heartbeat occured");
+
+			# save accumulated data
+			$_[KERNEL]->call($_[SESSION], 'stat_save');
+
+			# schedule next call
+			$log->debug("scheduling heartbeat at $opts{heartbeat} second(s)");
+			$_[KERNEL]->delay( heartbeat => $opts{heartbeat} );
+		},
+
+		# getting new log line
+		log_line => sub {
+			$log->debug("got new log line: '$_[ARG0]'");
+			for ($_[ARG0]) {
+				# last message was clean
+				m% spamd\[(\d+)\]: spamd: (clean message|identified spam) \(([\d\.-]+)/[\d\.-]+\) for ([^:]+)% and do {
+					$_[HEAP]{stats}{$4}{ $2 eq 'clean message' ? 'clean' : 'spam' }++;
+					$_[HEAP]{stats}{$4}{score} += $3;
+					$_[HEAP]{stats}{$4}{min} = min $_[HEAP]{stats}{$4}{min} || $3, $3;
+					$_[HEAP]{stats}{$4}{max} = max $_[HEAP]{stats}{$4}{max} || $3, $3;
+					$log->debug("line accepted for '$4' with score $3");
+					last;
+				};
+			}
+		},
+
+		# log rotating occured
+		log_rolled => sub {
+			$log->info("log rolled over");
+		},
+
+		# log tailing error
+		tail_error => sub {
+			$log->error("$_[ARG0] ($_[ARG1] during log tail: $_[ARG2]");
+			$_[KERNEL]->call($_[SESSION], 'shutdown');
+		},
+
+		# new client accepted
+		server_accept => sub {
+			my ($port,$addr) = sockaddr_in $_[ARG1];
+			$log->debug("client accepted from ".inet_ntoa($addr).":$port");
+			my $cl = POE::Wheel::ReadWrite->new(
+				Handle     => $_[ARG0],
+				InputEvent => 'client_input',
+				ErrorEvent => 'client_error',
+			);
+			$_[HEAP]->{clients}{$cl->ID} = $cl;
+		},
+
+		# server error occured
+		server_error => sub {
+			$log->error("$_[ARG0] ($_[ARG1] during serving: $_[ARG2]");
+			$_[KERNEL]->call($_[SESSION], 'shutdown');
+		},
+
+		# got client command
+		client_input => sub {
+			$log->debug("got client command: '$_[ARG0]'");
+			for ($_[ARG0]) {
+				# counters
+				/^brief$/i and do {
+					$_[KERNEL]->call($_[SESSION], 'stat_brief', $_[ARG1]);
+					last;
+				};
+				# print & reset
+				/^dump$/i and do {
+					$_[KERNEL]->call($_[SESSION], 'stat_print', $_[ARG1]);
+					$_[KERNEL]->call($_[SESSION], 'stat_reset');
+					$_[KERNEL]->call($_[SESSION], 'stat_save');
+					last;
+				};
+				# reset statistic
+				/^reset$/i and do {
+					$_[KERNEL]->call($_[SESSION], 'stat_reset');
+					$_[KERNEL]->call($_[SESSION], 'stat_save');
+					last;
+				};
+				# print out statistic
+				/^stats$/i and do {
+					$_[KERNEL]->call($_[SESSION], 'stat_print', $_[ARG1]);
+					last;
+				};
+				# disconnect request
+				/^quit$/i and do {
+					return delete $_[HEAP]->{clients}->{$_[ARG1]};
+				};
+				# invalid command
+				$log->warning("invalid client command: '$_[ARG0]'");
+				$_[HEAP]->{clients}{$_[ARG1]}->put('error');
+			}
+
+			# force buffer flush
+			$_[HEAP]->{clients}{$_[ARG1]}->flush;
+			$log->debug("buffer flushed");
+		},
+
+		# client errors (disconnect included)
+		client_error => sub {
+			$_[ARG1] ?
+				$log->error("$_[ARG0] ($_[ARG1] from client: $_[ARG2]") :
+				$log->debug("client disconnected");
+			# drop client connection
+			delete $_[HEAP]->{clients}->{$_[ARG3]};
+		},
+
+		# reset accumulated statistic
+		stat_reset => sub {
+			$log->debug("resetting statistic data");
+			delete $_[HEAP]->{stats};
+		},
+
+		# loading stored statistic
+		stat_load => sub {
+			$log->debug("loading statistic data");
+			open FH, $opts{database} and do {
+				local $/;
+				$_[HEAP]->{stats} = $_[HEAP]->{json}->Load(<FH>);
+			};
+		},
+
+		# store accumulated statistic
+		stat_save => sub {
+			$log->debug("storing statistic data");
+			open FH, '>', '.'.$opts{database} or do {
+				return warn "[database] error writing: $!\n";
+			};
+			print FH $_[HEAP]->{json}->Dump($_[HEAP]->{stats} || {});
+			close FH;
+
+			if (-f $opts{database}) {
+				unlink $opts{database} or do {
+					return warn "[database] error removing: $!\n";
+				};
+			};
+			rename '.'.$opts{database}, $opts{database} or do {
+				return warn "[database] error renaming: $!\n";
+			};
+		},
+
+		# print out brief
+		stat_brief => sub {
+			$log->debug("reporting brief");
+			my $clean = sum ( map { $_->{clean} } values %{ $_[HEAP]->{stats} } ) || 0;
+			my $spam  = sum ( map { $_->{spam}  } values %{ $_[HEAP]->{stats} } ) || 0;
+			$_[HEAP]->{clients}{$_[ARG0]}->put(
+				sprintf "clean:%d:%.0f\nspam:%d:%.0f\ntotal:%d:100",
+				$clean, 100 * $clean / ($clean + $spam),
+				$spam, 100 * $spam / ($clean + $spam),
+				$clean + $spam
+			);
+		},
+
+		# print out statistic
+		stat_print => sub {
+			$log->debug("reporting statistic");
+			my @users = keys %{ $_[HEAP]->{stats} || {} };
+			my $flen  = ( max (map { length } @users) || 0 ) + 1;
+			for my $u (sort @users) {
+				my $t = sum map { $_[HEAP]->{stats}{$u}{$_} || 0 } qw(clean spam);
+				$_[HEAP]->{clients}{$_[ARG0]}->put(
+					sprintf "%- ${flen}s clean=%d spam=%d crate=%.1f srate=%.1f score=%.1f min=%.1f max=%.1f avg=%.1f",
+					$u,
+					$_[HEAP]->{stats}{$u}{clean} || 0,
+					$_[HEAP]->{stats}{$u}{spam}  || 0,
+					$t ? 100 * ( $_[HEAP]->{stats}{$u}{clean} || 0 )/$t : 0,
+					$t ? 100 * ( $_[HEAP]->{stats}{$u}{spam}  || 0 )/$t : 0,
+					$_[HEAP]->{stats}{$u}{score},
+					$_[HEAP]->{stats}{$u}{min},
+					$_[HEAP]->{stats}{$u}{max},
+					$t ? $_[HEAP]->{stats}{$u}{score}/$t: 0,
+				);
+			}
+		},
+
+		# graceful exit
+		shutdown => sub {
+			$log->debug("gracefully shutting down");
+
+			# store statistic
+			$_[KERNEL]->call($_[SESSION], 'stat_save');
+
+			# drop all timers
+			$log->debug("removing alarms");
+			$_[KERNEL]->alarm_remove_all;
+
+			# delete all internal references
+			$log->debug("shutting down components");
+			delete $_[HEAP]->{tailer};
+			delete $_[HEAP]->{server};
+
+			$log->debug("disconnecting clients");
+			delete $_[HEAP]->{clients}{$_} for keys %{ $_[HEAP]->{clients} };
+
+			# keep signal handled
+			$_[KERNEL]->sig_handled;
+			$log->notice("exit");
+		},
+	}
+);
+
+# go!
+POE::Kernel->run;
+
+
+# log formatting routines
+sub pfmt {
+	my %m = @_;
+	sprintf "$$: %s\n", $m{message};
+}
+sub lfmt {
+	my %m = @_;
+	sprintf "[%s] %s", $m{level}, $m{message};
+}
+sub dfmt {
+	my %m = @_;
+	sprintf "%s %s", strftime("%Y/%m/%d %H:%M:%S",localtime), $m{message};
+}
+
+sub usage {
+
+=head1 OPTIONS
+
+ -b, --heartbeat=SECONDS     Heartbeat period for saving statistic in a permanent storage
+                             Default values is 10 seconds.
+
+ -g, --debug                 Running in debug mode:
+                               - no detach (run in foreground)
+                               - no set user (run with permissions of current user)
+                               - logging information as much as possible to stderr
+
+ -d, --database=FILE         Path to database file keeping statistic (created automatically).
+                             Default setting is C<sastatd.db> file in current directory.
+
+ -h, --help                  Show short help message about options format.
+
+ -l, --listen=[ADDR:]PORT    Address with port or just port (* supposed for address)
+                             for listen socket binding.
+
+ -p, --pid-file=FILE         Path to file with process id (guarantee only one daemon running).
+
+ -u, --user=LOGIN            Account name for changing process privileges to.
+
+=cut 
+
+	die <<EOM;
+
+Usage: $FindBin::RealScript [ options ] spamd-log-file
+
+Options:
+    -b, --heartbeat=SECONDS   heartbeat period
+    -d, --database=FILE       persistent storage
+    -g, --debug               run in debug mode
+    -h, --help                show this help message
+    -l, --listen=[ADDR:]PORT  listen socket
+    -p, --pid-file=FILE       pid file path
+    -u, --user=LOGIN          change effective process uid to
+
+EOM
+}
+
+=head1 AUTHOR
+
+Oleg A. Mamontov (oleg@mamontov.net)
+
+=head1 COPYRIGHT
+
+Copyright (C) 2010 Oleg A. Mamontov. All rights reserved.
+
+This script is free software; you can redistribute it and/or modify it under the same terms
+as Perl itself.
+
+=cut
+

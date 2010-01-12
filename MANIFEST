@@ -1,0 +1,7 @@
+bin/sastatd
+Changes
+Makefile.PL
+MANIFEST
+META.yml
+README
+t/00-deps.t
