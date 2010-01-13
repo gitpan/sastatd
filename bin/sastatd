@@ -49,7 +49,7 @@ use POE qw(Wheel::FollowTail Wheel::ListenAccept Wheel::ReadWrite);
 use POSIX;
 use Socket;
 
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 
 # parse command line
 my %opts;
@@ -312,8 +312,8 @@ POE::Session->create(
 		# print out brief
 		stat_brief => sub {
 			$log->debug("reporting brief");
-			my $clean = sum ( map { $_->{clean} } values %{ $_[HEAP]->{stats} } ) || 0;
-			my $spam  = sum ( map { $_->{spam}  } values %{ $_[HEAP]->{stats} } ) || 0;
+			my $clean = sum ( map { $_->{clean} || 0 } values %{ $_[HEAP]->{stats} } ) || 0;
+			my $spam  = sum ( map { $_->{spam}  || 0 } values %{ $_[HEAP]->{stats} } ) || 0;
 			$_[HEAP]->{clients}{$_[ARG0]}->put(
 				sprintf "clean:%d:%.0f\nspam:%d:%.0f\ntotal:%d:100",
 				$clean, 100 * $clean / ($clean + $spam),
