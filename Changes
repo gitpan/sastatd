@@ -6,3 +6,6 @@ Revision history for sastatd
 0.02    2010-01-12
         - Small bugfix
 
+0.03    2010-01-12
+        - Fixed bug with database storing
+

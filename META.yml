@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               sastatd
-version:            0.02
+version:            0.03
 abstract:           SpamAssassin statistic collecting server
 author:
     - Oleg A. Mamontov <oleg@mamontov.net>
@@ -9,13 +9,11 @@ distribution_type:  module
 configure_requires:
     ExtUtils::MakeMaker:  0
 requires:
-    JSON::Any:            0
-    Log::Dispatch:        0
-    Log::Dispatch::Screen:  0
-    Log::Dispatch::Syslog:  0
-    Pid::File::Flock:     0
-    POE:                  0
-    Test::More:           0
+    JSON::Any:         0
+    Log::Dispatch:     2.26
+    Pid::File::Flock:  0
+    POE:               0
+    Test::More:        0
 no_index:
     directory:
         - t

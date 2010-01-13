@@ -11,9 +11,7 @@ WriteMakefile(
 	PL_FILES            => {},
 	PREREQ_PM => {
 		'JSON::Any'             => 0,
-		'Log::Dispatch'         => 0,
-		'Log::Dispatch::Screen' => 0,
-		'Log::Dispatch::Syslog' => 0,
+		'Log::Dispatch'         => 2.26,
 		'Test::More'            => 0,
 		'Pid::File::Flock'      => 0,
 		'POE'                   => 0,
