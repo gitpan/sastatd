@@ -15,6 +15,7 @@ WriteMakefile(
 		'Test::More'            => 0,
 		'Pid::File::Flock'      => 0,
 		'POE'                   => 0,
+		'Sys::Syslog'           => 0.16,
 	},
 	PREREQ_FATAL        => 1,
 	EXE_FILES           => [ 'bin/sastatd' ],

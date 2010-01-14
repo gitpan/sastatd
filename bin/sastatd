@@ -2,7 +2,7 @@
 
 =head1 NAME
 
-sastatd - SpamAssassin statistic collecting server
+sastatd - SpamAssassin statistics collecting server
 
 =head1 SYNOPSIS
 
@@ -13,8 +13,8 @@ sastatd [ options ] spamd-log-file
 This script (running as a daemon) permanent watching for SpamAssassin
 spamd log file and increment internal counters for any B<spam> and
 B<clean> message. Log rotating events detected automatically, no
-special actions required. Accumulated statistic flushed to persistent
-file based storage periodically. Statistic dump is available via simple
+special actions required. Accumulated statistics flushed to persistent
+file based storage periodically. Statistics dump is available via simple
 TCP based protocol.
 
 =head1 PROTOCOL
@@ -24,9 +24,9 @@ followed by a new line character.
 
 Available commands (case independent):
     B<brief>  - print out only counters and rate for clean/spam/total messages
-    B<stats>  - print out statistic in easily parsable format
-    B<reset>  - clear all accumulated statistic
-    B<dump>   - print out statistic and clear it immediately
+    B<stats>  - print out statistics in easily parseable format
+    B<reset>  - clear all accumulated statistics
+    B<dump>   - print out statistics and clear it immediately
     B<quit>   - force close connection
 
 =head1 CLIENT EXAMPLE
@@ -49,7 +49,7 @@ use POE qw(Wheel::FollowTail Wheel::ListenAccept Wheel::ReadWrite);
 use POSIX;
 use Socket;
 
-our $VERSION = 0.03;
+our $VERSION = 0.04;
 
 # parse command line
 my %opts;
@@ -118,6 +118,9 @@ POE::Session->create(
 		_start => sub {
 			$log->debug("initializing POE session");
 
+			# talk POE kernel adjust to the new situation
+			$_[KERNEL]->has_forked;
+
 			# signals
 			$log->debug("setting up signal handlers");
 			$_[KERNEL]->sig(HUP  => 'shutdown');
@@ -148,7 +151,7 @@ POE::Session->create(
 				return $_[KERNEL]->call($_[SESSION], 'shutdown');
 			};
 
-			# statistic server
+			# statistics server
 			$log->debug("creating TCP server");
 			$_[HEAP]->{server} = POE::Wheel::ListenAccept->new(
 				Handle      => $sock,
@@ -241,13 +244,13 @@ POE::Session->create(
 					$_[KERNEL]->call($_[SESSION], 'stat_save');
 					last;
 				};
-				# reset statistic
+				# reset statistics
 				/^reset$/i and do {
 					$_[KERNEL]->call($_[SESSION], 'stat_reset');
 					$_[KERNEL]->call($_[SESSION], 'stat_save');
 					last;
 				};
-				# print out statistic
+				# print out statistics
 				/^stats$/i and do {
 					$_[KERNEL]->call($_[SESSION], 'stat_print', $_[ARG1]);
 					last;
@@ -275,37 +278,37 @@ POE::Session->create(
 			delete $_[HEAP]->{clients}->{$_[ARG3]};
 		},
 
-		# reset accumulated statistic
+		# reset accumulated statistics
 		stat_reset => sub {
-			$log->debug("resetting statistic data");
+			$log->debug("resetting statistics data");
 			delete $_[HEAP]->{stats};
 		},
 
-		# loading stored statistic
+		# loading stored statistics
 		stat_load => sub {
-			$log->debug("loading statistic data");
+			$log->debug("loading statistics data");
 			open FH, $opts{database} and do {
 				local $/;
 				$_[HEAP]->{stats} = $_[HEAP]->{json}->Load(<FH>);
 			};
 		},
 
-		# store accumulated statistic
+		# store accumulated statistics
 		stat_save => sub {
-			$log->debug("storing statistic data");
+			$log->debug("storing statistics data");
 			open FH, '>', $opts{database}.'~' or do {
-				return warn "[database] error writing: $!\n";
+				return $log->warning("[database] error writing: $!");
 			};
 			print FH $_[HEAP]->{json}->Dump($_[HEAP]->{stats} || {});
 			close FH;
 
 			if (-f $opts{database}) {
 				unlink $opts{database} or do {
-					return warn "[database] error removing: $!\n";
+					return $log->warning("[database] error removing: $!");
 				};
 			};
 			rename $opts{database}.'~', $opts{database} or do {
-				return warn "[database] error renaming: $!\n";
+				return $log->warning("[database] error renaming: $!");
 			};
 		},
 
@@ -322,9 +325,9 @@ POE::Session->create(
 			);
 		},
 
-		# print out statistic
+		# print out statistics
 		stat_print => sub {
-			$log->debug("reporting statistic");
+			$log->debug("reporting statistics");
 			my @users = keys %{ $_[HEAP]->{stats} || {} };
 			my $flen  = ( max (map { length } @users) || 0 ) + 1;
 			for my $u (sort @users) {
@@ -348,7 +351,7 @@ POE::Session->create(
 		shutdown => sub {
 			$log->debug("gracefully shutting down");
 
-			# store statistic
+			# store statistics
 			$_[KERNEL]->call($_[SESSION], 'stat_save');
 
 			# drop all timers
@@ -392,7 +395,7 @@ sub usage {
 
 =head1 OPTIONS
 
- -b, --heartbeat=SECONDS     Heartbeat period for saving statistic in a permanent storage
+ -b, --heartbeat=SECONDS     Heartbeat period for saving statistics in a permanent storage
                              Default values is 10 seconds.
 
  -g, --debug                 Running in debug mode:
@@ -400,8 +403,8 @@ sub usage {
                                - no set user (run with permissions of current user)
                                - logging information as much as possible to stderr
 
- -d, --database=FILE         Path to database file keeping statistic (created automatically).
-                             Default setting is C<sastatd.db> file in current directory.
+ -d, --database=FILE         Path to database file keeping statistics (created automatically).
+                             Default setting is 'sastatd.db' file in current directory.
 
  -h, --help                  Show short help message about options format.
 

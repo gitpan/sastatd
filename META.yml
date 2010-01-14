@@ -1,7 +1,7 @@
 --- #YAML:1.0
 name:               sastatd
-version:            0.03
-abstract:           SpamAssassin statistic collecting server
+version:            0.04
+abstract:           SpamAssassin statistics collecting server
 author:
     - Oleg A. Mamontov <oleg@mamontov.net>
 license:            perl
@@ -13,6 +13,7 @@ requires:
     Log::Dispatch:     2.26
     Pid::File::Flock:  0
     POE:               0
+    Sys::Syslog:       0.16
     Test::More:        0
 no_index:
     directory:
