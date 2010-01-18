@@ -49,7 +49,7 @@ use POE qw(Wheel::FollowTail Wheel::ListenAccept Wheel::ReadWrite);
 use POSIX;
 use Socket;
 
-our $VERSION = 0.04;
+our $VERSION = 0.05;
 
 # parse command line
 my %opts;

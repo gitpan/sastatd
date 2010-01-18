@@ -13,3 +13,6 @@ Revision history for sastatd
         - Fixed bug with setting signal handlers after fork (daemon mode)
         - Perl 'warn' replaced with $log->warning
 
+0.05    2010-01-18
+        - Load test fixed
+

@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               sastatd
-version:            0.04
+version:            0.05
 abstract:           SpamAssassin statistics collecting server
 author:
     - Oleg A. Mamontov <oleg@mamontov.net>
